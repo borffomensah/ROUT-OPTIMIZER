@@ -1,0 +1,3 @@
+venv/
+.parcel-cache/
+__pycache__/
