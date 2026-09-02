@@ -18,6 +18,10 @@ An end-to-end applied machine learning and interactive spatial optimization web 
 * **Machine Learning & Modeling:** Scikit-Learn, Joblib, Pandas
 * **Deployment & Ops:** Docker, Git / GitHub Actions
 
+<p align="center">
+  <small>Designed & Engineered by <b>Daniel Borffo Mensah</b> | Data Scientist & Machine Learning Engineer</small>
+</p>
+
 
 ## 📂 Project Directory Structure
 ```text
@@ -33,7 +37,8 @@ JBG-Logistics-Optimizer/
 ├── requirements.txt         # Project dependencies
 └── README.md                # Project documentation
 
-* ---
-<p align="center">
-  <small>Designed & Engineered by <b>Daniel Borffo Mensah</b> | Data Scientist & Machine Learning Engineer</small>
-</p>
+
+
+
+
+
