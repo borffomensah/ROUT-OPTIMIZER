@@ -1,3 +1,12 @@
+"""
+=============================================================================
+Author: Daniel Borffo Mensah
+Project: JBG Logistics Route Optimizer & ML Risk Predictor
+Description: Multi-stop logistics corridor planner across Ghanaian highways.
+=============================================================================
+"""
+
+import math
 import folium
 import joblib
 import pandas as pd
@@ -8,10 +17,10 @@ from streamlit_folium import st_folium
 model = joblib.load("models/route_recommendation_model.pkl")
 encoders = joblib.load("models/feature_encoders.pkl")
 
-st.title("JBG Logistics Rout Optimizer")
+st.title("JBG Logistics Route Optimizer")
 st.write(
-    "Plan optimal transportation routes, estimate fuel costs, manage multi-stop"
-    " milk-runs, and visualize corridor paths across all regional capitals and connecting highway towns in Ghana."
+    "Plan optimal transportation routes, estimate fuel costs, manage multi-stop "
+    "milk-runs, and visualize corridor paths across all regional capitals and connecting highway towns in Ghana."
 )
 
 # Comprehensive dictionary containing all regional capitals and major highway towns
@@ -117,17 +126,51 @@ hub_coords = {
     "Tumu": [10.3392, -1.9789],
 }
 
+def optimize_stop_order(start, stops, end, coords_dict, method="angle"):
+    """Sorts stops logically based on chosen strategy (Angle Loop, Reverse Angle, or Nearest Neighbor)."""
+    if not stops:
+        return []
+    
+    MAX_LEG_JUMP_DEG = 4.2 
+    def get_dist_deg(c1, c2):
+        p1 = coords_dict.get(c1, [0, 0])
+        p2 = coords_dict.get(c2, [0, 0])
+        return math.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
+
+    valid_stops = [s for s in stops if get_dist_deg(start, s) <= MAX_LEG_JUMP_DEG or start == end]
+
+    if method == "angle" and start == end and len(valid_stops) > 2:
+        center_lat, center_lon = 6.7, -1.5
+        return sorted(valid_stops, key=lambda c: math.atan2(coords_dict[c][0] - center_lat, coords_dict[c][1] - center_lon))
+    elif method == "reverse_angle" and start == end and len(valid_stops) > 2:
+        center_lat, center_lon = 6.7, -1.5
+        return sorted(valid_stops, key=lambda c: math.atan2(coords_dict[c][0] - center_lat, coords_dict[c][1] - center_lon), reverse=True)
+    
+    # Nearest-Neighbor fallback
+    unvisited = list(valid_stops)
+    current = start
+    ordered_stops = []
+    while unvisited:
+        next_stop = min(unvisited, key=lambda city: get_dist_deg(current, city))
+        ordered_stops.append(next_stop)
+        current = next_stop
+        unvisited.remove(next_stop)
+        
+    return ordered_stops
+
 # Initialize Session State safely
 if "optimized" not in st.session_state:
-  st.session_state.optimized = False
-  st.session_state.prediction = None
-  st.session_state.proba_val = 0.0
-  st.session_state.corridor_choice = None
-  st.session_state.legs = []
-  st.session_state.total_distance = 0.0
-  st.session_state.total_time = 0.0
-  st.session_state.path_coords = []
-  st.session_state.full_path_names = []
+    st.session_state.optimized = False
+    st.session_state.prediction = None
+    st.session_state.proba_val = 0.0
+    st.session_state.corridor_choice = None
+    st.session_state.legs = []
+    st.session_state.total_distance = 0.0
+    st.session_state.total_time = 0.0
+    st.session_state.path_coords = []
+    st.session_state.full_path_names = []
+    st.session_state.strategy_comparison = []
+    st.session_state.best_strategy_name = ""
 
 # Sidebar inputs for user selection
 st.sidebar.header("Route & Milk-Run Parameters")
@@ -163,241 +206,306 @@ weather = st.sidebar.selectbox(
 road_type = st.sidebar.selectbox("Road Type", encoders["road_type"].classes_)
 accidents = st.sidebar.slider("Historical Accidents Count (Per Leg)", 0, 5, 0)
 
-if st.sidebar.button("Optimize Multi-Stop Route"):
-  full_path = [start_city] + intermediate_stops + [end_city]
-  
-  leg_records = []
-  total_dist = 0.0
-  total_time = 0.0
-  path_latlons = []
-  
-  overall_recommendation = 1
-  min_proba = 1.0
-
-  for i in range(len(full_path) - 1):
-    leg_start = full_path[i]
-    leg_end = full_path[i+1]
-    
-    p1 = hub_coords.get(leg_start, [5.6, -0.1])
-    p2 = hub_coords.get(leg_end, [5.6, -0.1])
-    
-    approx_dist = ((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)**0.5 * 111.0 * 1.3
-    approx_dist = max(approx_dist, 8.0)
-    
-    if "Primary National Highway" in route_strategy:
-      leg_dist = approx_dist
-      leg_time = (leg_dist / 65.0) * 60.0
-      road_val = "Main"
-    elif "Secondary Regional Bypass" in route_strategy:
-      leg_dist = approx_dist * 1.08
-      leg_time = (leg_dist / 55.0) * 60.0
-      road_val = "Main"
+if st.sidebar.button("Optimize & Compare Routes"):
+    if not intermediate_stops:
+        st.sidebar.error("Please select at least one intermediate drop-off stop for multi-stop optimization.")
     else:
-      leg_dist = approx_dist * 0.95
-      leg_time = (leg_dist / 40.0) * 60.0
-      road_val = "Local"
+        # Define candidate sorting strategies to evaluate efficiency
+        candidate_strategies = {
+            "Geographic Angle Loop (Standard)": optimize_stop_order(start_city, intermediate_stops, end_city, hub_coords, method="angle"),
+            "Geographic Angle Loop (Reversed)": optimize_stop_order(start_city, intermediate_stops, end_city, hub_coords, method="reverse_angle"),
+            "Nearest-Neighbor Circuit": optimize_stop_order(start_city, intermediate_stops, end_city, hub_coords, method="nn")
+        }
 
-    input_df = pd.DataFrame(
-        [[
-            leg_start,
-            leg_end,
-            leg_dist,
-            leg_time,
-            traffic_level,
-            weather,
-            road_val,
-            accidents,
-            leg_dist * 2.1,
-            8.2,
-            5,
-            65.0,
-        ]],
-        columns=[
-            "start_city",
-            "end_city",
-            "distance_km",
-            "travel_time_min",
-            "traffic_level",
-            "weather",
-            "road_type",
-            "accidents",
-            "fuel_cost",
-            "safety_index",
-            "scenic_score",
-            "avg_speed_kmph",
-        ],
-    )
+        comparison_records = []
+        strategy_store = {}
 
-    for col, enc_key in [("start_city", "start_city"), ("end_city", "end_city"), ("weather", "weather")]:
-      if input_df[col].iloc[0] in encoders[enc_key].classes_:
-        input_df[col] = encoders[enc_key].transform(input_df[col])
-      else:
-        input_df[col] = 0
+        for strat_name, optimized_intermediates in candidate_strategies.items():
+            full_path = [start_city] + optimized_intermediates + [end_city]
+            leg_records = []
+            total_dist = 0.0
+            total_time = 0.0
+            path_latlons = []
+            
+            overall_recommendation = 1
+            min_proba = 1.0
 
-    if road_val in encoders["road_type"].classes_:
-      input_df["road_type"] = encoders["road_type"].transform([road_val])[0]
-    else:
-      input_df["road_type"] = 0
+            for i in range(len(full_path) - 1):
+                leg_start = full_path[i]
+                leg_end = full_path[i+1]
+                
+                p1 = hub_coords.get(leg_start, [5.6, -0.1])
+                p2 = hub_coords.get(leg_end, [5.6, -0.1])
+                
+                approx_dist = ((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)**0.5 * 111.0 * 1.3
+                approx_dist = max(approx_dist, 8.0)
+                
+                if "Primary National Highway" in route_strategy:
+                    leg_dist = approx_dist
+                    leg_time = (leg_dist / 65.0) * 60.0
+                    road_val = "Main"
+                elif "Secondary Regional Bypass" in route_strategy:
+                    leg_dist = approx_dist * 1.08
+                    leg_time = (leg_dist / 55.0) * 60.0
+                    road_val = "Main"
+                else:
+                    leg_dist = approx_dist * 0.95
+                    leg_time = (leg_dist / 40.0) * 60.0
+                    road_val = "Local"
 
-    pred = model.predict(input_df)[0]
-    proba = model.predict_proba(input_df)[0]
-    conf = proba[pred]
+                input_df = pd.DataFrame(
+                    [[
+                        leg_start,
+                        leg_end,
+                        leg_dist,
+                        leg_time,
+                        traffic_level,
+                        weather,
+                        road_val,
+                        accidents,
+                        leg_dist * 2.1,
+                        8.2,
+                        5,
+                        65.0,
+                    ]],
+                    columns=[
+                        "start_city",
+                        "end_city",
+                        "distance_km",
+                        "travel_time_min",
+                        "traffic_level",
+                        "weather",
+                        "road_type",
+                        "accidents",
+                        "fuel_cost",
+                        "safety_index",
+                        "scenic_score",
+                        "avg_speed_kmph",
+                    ],
+                )
 
-    if pred == 0:
-      overall_recommendation = 0
-    if conf < min_proba:
-      min_proba = conf
+                for col, enc_key in [("start_city", "start_city"), ("end_city", "end_city"), ("weather", "weather")]:
+                    if input_df[col].iloc[0] in encoders[enc_key].classes_:
+                        input_df[col] = encoders[enc_key].transform(input_df[col])
+                    else:
+                        input_df[col] = 0
 
-    total_dist += leg_dist
-    total_time += leg_time
-    
-    leg_records.append({
-        "Leg": f"{leg_start} ➔ {leg_end}",
-        "Distance (km)": round(leg_dist, 1),
-        "Time (hrs)": round(leg_time / 60.0, 1),
-        "Fuel Cost (GHS)": round(leg_dist * 2.1, 2),
-        "Status": "Recommended" if pred == 1 else "Caution / Risk"
-    })
+                if road_val in encoders["road_type"].classes_:
+                    input_df["road_type"] = encoders["road_type"].transform([road_val])[0]
+                else:
+                    input_df["road_type"] = 0
 
-    path_latlons.append(hub_coords.get(leg_start))
-  
-  path_latlons.append(hub_coords.get(full_path[-1]))
+                if leg_dist > 450.0 or leg_time > 360.0:
+                    pred = 0
+                    conf = 0.99
+                    overall_recommendation = 0
+                    if conf < min_proba:
+                        min_proba = conf
+                else:
+                    pred = model.predict(input_df)[0]
+                    proba = model.predict_proba(input_df)[0]
+                    conf = proba[pred]
 
-  st.session_state.optimized = True
-  st.session_state.prediction = overall_recommendation
-  st.session_state.proba_val = min_proba
-  st.session_state.corridor_choice = route_strategy
-  st.session_state.legs = leg_records
-  st.session_state.total_distance = total_dist
-  st.session_state.total_time = total_time
-  st.session_state.path_coords = path_latlons
-  st.session_state.full_path_names = full_path
+                    if pred == 0:
+                        overall_recommendation = 0
+                    if conf < min_proba:
+                        min_proba = conf
+
+                total_dist += leg_dist
+                total_time += leg_time
+                
+                leg_records.append({
+                    "Leg": f"{leg_start} ➔ {leg_end}",
+                    "Distance (km)": round(leg_dist, 1),
+                    "Time (hrs)": round(leg_time / 60.0, 1),
+                    "Fuel Cost (GHS)": round(leg_dist * 2.1, 2),
+                    "Status": "Recommended" if pred == 1 else "Caution / Risk"
+                })
+
+                path_latlons.append(hub_coords.get(leg_start))
+            
+            path_latlons.append(hub_coords.get(full_path[-1]))
+
+            strategy_store[strat_name] = {
+                "prediction": overall_recommendation,
+                "proba_val": min_proba,
+                "legs": leg_records,
+                "total_distance": total_dist,
+                "total_time": total_time,
+                "path_coords": path_latlons,
+                "full_path_names": full_path
+            }
+
+            comparison_records.append({
+                "Strategy": strat_name,
+                "First Stop": full_path[1],
+                "Total Distance (km)": round(total_dist, 1),
+                "Total Time (hrs)": round(total_time / 60.0, 1),
+                "Fuel Cost (GHS)": round(total_dist * 2.1, 2)
+            })
+
+        # Automatically determine the best strategy based on minimal total distance/fuel efficiency
+        best_strat_info = min(comparison_records, key=lambda x: x["Total Distance (km)"])
+        best_name = best_strat_info["Strategy"]
+
+        st.session_state.optimized = True
+        st.session_state.strategy_comparison = comparison_records
+        st.session_state.best_strategy_name = best_name
+        
+        # Load best strategy details into active session state for mapping and display
+        best_data = strategy_store[best_name]
+        st.session_state.prediction = best_data["prediction"]
+        st.session_state.proba_val = best_data["proba_val"]
+        st.session_state.corridor_choice = route_strategy
+        st.session_state.legs = best_data["legs"]
+        st.session_state.total_distance = best_data["total_distance"]
+        st.session_state.total_time = best_data["total_time"]
+        st.session_state.path_coords = best_data["path_coords"]
+        st.session_state.full_path_names = best_data["full_path_names"]
 
 # Display results if optimization has been run
 if st.session_state.optimized:
-  st.subheader("Optimization Results (Multi-Stop Milk Run)")
-  
-  if st.session_state.prediction == 1:
+    st.subheader("📊 Routing Strategy Efficiency Comparison")
+    comp_df = pd.DataFrame(st.session_state.strategy_comparison)
+    st.dataframe(comp_df, use_container_width=True)
+
+    best_strat = st.session_state.best_strategy_name
+    first_stop_name = st.session_state.full_path_names[1] if len(st.session_state.full_path_names) > 1 else "Destination"
+    
     st.success(
-        f"✅ **Complete Multi-Stop Route Recommended via {st.session_state.corridor_choice}!** "
-        f"(Min Leg Confidence: {st.session_state.proba_val*100:.1f}%)"
-    )
-  else:
-    st.warning(
-        f"⚠️ **Route Contains High-Risk Segments** due to traffic, weather, or road conditions."
+        f"🏆 **Optimal Conclusion:** **{best_strat}** is recommended to start first. "
+        f"It begins by heading directly to **{first_stop_name}**, optimizing fuel efficiency at "
+        f"**GHS {st.session_state.total_distance * 2.1:.2f}** and total distance of **{st.session_state.total_distance:.1f} km**."
     )
 
-  col1, col2, col3 = st.columns(3)
-  col1.metric("Total Distance", f"{st.session_state.total_distance:.1f} km")
-  col2.metric("Total Est. Time", f"{st.session_state.total_time / 60:.1f} hours")
-  col3.metric("Total Est. Fuel Cost", f"GHS {st.session_state.total_distance * 2.1:.2f}")
-
-  st.markdown("### 📋 Segment-by-Segment Manifest")
-  legs_df = pd.DataFrame(st.session_state.legs)
-  st.dataframe(legs_df, use_container_width=True)
-
-  # Interactive Map Creation
-  map_center = (
-      st.session_state.path_coords[0]
-      if st.session_state.path_coords
-      else [7.9465, -1.0232]
-  )
-
-  ghana_map = folium.Map(
-      location=map_center,
-      zoom_start=8,
-      min_zoom=7,
-      max_zoom=16,
-      max_bounds=True,
-      min_lat=4.5,
-      max_lat=11.5,
-      min_lon=-3.5,
-      max_lon=1.5,
-      control_scale=True,
-  )
-
-  # Add markers with staggered town labels
-  for idx, city_name in enumerate(st.session_state.full_path_names):
-    coords = hub_coords.get(city_name, [5.6, -0.1])
-    if idx == 0:
-      icon_color = "blue"
-      icon_type = "play"
-      role_label = "Origin"
-    elif idx == len(st.session_state.full_path_names) - 1:
-      icon_color = "red"
-      icon_type = "flag"
-      role_label = "Destination"
+    st.subheader("Selected Optimal Route Manifest")
+    if st.session_state.prediction == 1:
+        st.success(
+            f"✅ **Complete Multi-Stop Route Recommended via {st.session_state.corridor_choice}!** "
+            f"(Min Leg Confidence: {st.session_state.proba_val*100:.1f}%)"
+        )
     else:
-      icon_color = "green"
-      icon_type = "stop"
-      role_label = f"Stop #{idx}"
+        st.warning(
+            f"⚠️ **Route Contains High-Risk Segments** due to excessive distance, driver fatigue risk, or adverse conditions."
+        )
 
-    folium.Marker(
-        coords,
-        popup=f"<b>{city_name}</b><br>Role: {role_label}",
-        icon=folium.Icon(color=icon_color, icon=icon_type, prefix="fa"),
-    ).add_to(ghana_map)
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total Distance", f"{st.session_state.total_distance:.1f} km")
+    col2.metric("Total Est. Time", f"{st.session_state.total_time / 60:.1f} hours")
+    col3.metric("Total Est. Fuel Cost", f"GHS {st.session_state.total_distance * 2.1:.2f}")
 
-    lat_offset = -0.035 if idx % 2 == 0 else 0.035
+    st.markdown("### 📋 Segment-by-Segment Manifest")
+    legs_df = pd.DataFrame(st.session_state.legs)
+    st.dataframe(legs_df, use_container_width=True)
+
+    # Interactive Map Creation
+    map_center = (
+        st.session_state.path_coords[0]
+        if st.session_state.path_coords
+        else [7.9465, -1.0232]
+    )
+
+    ghana_map = folium.Map(
+        location=map_center,
+        zoom_start=8,
+        min_zoom=7,
+        max_zoom=16,
+        max_bounds=True,
+        min_lat=4.5,
+        max_lat=11.5,
+        min_lon=-3.5,
+        max_lon=1.5,
+        control_scale=True,
+    )
+
+    # Add markers with sequential drop-off numbering
+    full_path = st.session_state.full_path_names
+    dropoff_counter = 1
     
-    town_label_html = f"""
-    <div style="font-size: 10px; font-weight: bold; color: #1a237e; background: rgba(255,255,255,0.95); padding: 2px 4px; border-radius: 3px; border: 1px solid #3f51b5; white-space: nowrap; box-shadow: 1px 1px 2px rgba(0,0,0,0.2);">
-        📍 {city_name} <span style="font-size: 8px; color: #555;">({role_label})</span>
-    </div>
-    """
-    folium.Marker(
-        [coords[0] + lat_offset, coords[1]],
-        icon=folium.DivIcon(html=town_label_html)
-    ).add_to(ghana_map)
+    for idx, city_name in enumerate(full_path):
+        coords = hub_coords.get(city_name, [5.6, -0.1])
+        if idx == 0:
+            icon_color = "blue"
+            icon_type = "play"
+            role_label = "Origin"
+            display_label = f"📍 {city_name} (Origin)"
+        elif idx == len(full_path) - 1:
+            icon_color = "red"
+            icon_type = "flag"
+            role_label = "Destination"
+            display_label = f"📍 {city_name} (Destination)"
+        else:
+            icon_color = "green"
+            icon_type = "stop"
+            role_label = f"Drop-off #{dropoff_counter}"
+            display_label = f"📍 {dropoff_counter}. {city_name} <span style='font-size: 8px; color: #555;'>(Drop-off #{dropoff_counter})</span>"
+            dropoff_counter += 1
 
-  # Draw corridor paths and stagger metric badges
-  for i in range(len(st.session_state.full_path_names) - 1):
-    p1 = hub_coords.get(st.session_state.full_path_names[i])
-    p2 = hub_coords.get(st.session_state.full_path_names[i+1])
-    
-    folium.PolyLine(
-        [p1, p2],
-        color="green" if st.session_state.prediction == 1 else "orange",
-        weight=4,
-        opacity=0.8
-    ).add_to(ghana_map)
+        folium.Marker(
+            coords,
+            popup=f"<b>{city_name}</b><br>Role: {role_label}",
+            icon=folium.Icon(color=icon_color, icon=icon_type, prefix="fa"),
+        ).add_to(ghana_map)
 
-    mid_lat = (p1[0] + p2[0]) / 2
-    mid_lon = (p1[1] + p2[1]) / 2
-    
-    metric_lat_offset = 0.045 if i % 2 == 0 else -0.045
-    
-    leg_data = st.session_state.legs[i]
-    metric_html = f"""
-    <div style="background-color: #ffffff; padding: 4px 6px; border: 1px solid #2e7d32; font-size: 9px; border-radius: 4px; box-shadow: 1px 1px 4px rgba(0,0,0,0.3); white-space: nowrap;">
-        <b>{leg_data['Leg']}</b><br>
-        📏 {leg_data['Distance (km)']}km | ⏱️ {leg_data['Time (hrs)']}h<br>
-        ⛽ GHS {leg_data['Fuel Cost (GHS)']}
-    </div>
-    """
-    folium.Marker(
-        [mid_lat + metric_lat_offset, mid_lon],
-        icon=folium.DivIcon(html=metric_html)
-    ).add_to(ghana_map)
+        lat_offset = -0.035 if idx % 2 == 0 else 0.035
+        
+        town_label_html = f"""
+        <div style="font-size: 10px; font-weight: bold; color: #1a237e; background: rgba(255,255,255,0.95); padding: 2px 4px; border-radius: 3px; border: 1px solid #3f51b5; white-space: nowrap; box-shadow: 1px 1px 2px rgba(0,0,0,0.2);">
+            {display_label}
+        </div>
+        """
+        folium.Marker(
+            [coords[0] + lat_offset, coords[1]],
+            icon=folium.DivIcon(html=town_label_html)
+        ).add_to(ghana_map)
 
-  # Download Options for Map & Driver Report
-  st.markdown("### 📥 Export Route & Map Reports")
-  dl_col1, dl_col2 = st.columns(2)
+    # Draw corridor paths and stagger metric badges
+    for i in range(len(full_path) - 1):
+        p1 = hub_coords.get(full_path[i])
+        p2 = hub_coords.get(full_path[i+1])
+        
+        folium.PolyLine(
+            [p1, p2],
+            color="green" if st.session_state.prediction == 1 else "orange",
+            weight=4,
+            opacity=0.8
+        ).add_to(ghana_map)
 
-  # Map Download as Interactive HTML file (viewable & printable in any browser)
-  map_html_data = ghana_map._repr_html_().encode("utf-8")
-  dl_col1.download_button(
-      label="Download Route Map (HTML)",
-      data=map_html_data,
-      file_name="ghana_route_map.html",
-      mime="text/html",
-      help="Download the interactive map file for management review and browser printing."
-  )
+        mid_lat = (p1[0] + p2[0]) / 2
+        mid_lon = (p1[1] + p2[1]) / 2
+        
+        metric_lat_offset = 0.045 if i % 2 == 0 else -0.045
+        
+        leg_data = st.session_state.legs[i]
+        metric_html = f"""
+        <div style="background-color: #ffffff; padding: 4px 6px; border: 1px solid #2e7d32; font-size: 9px; border-radius: 4px; box-shadow: 1px 1px 4px rgba(0,0,0,0.3); white-space: nowrap;">
+            <b>{leg_data['Leg']}</b><br>
+            📏 {leg_data['Distance (km)']}km | ⏱️ {leg_data['Time (hrs)']}h<br>
+            ⛽ GHS {leg_data['Fuel Cost (GHS)']}
+        </div>
+        """
+        folium.Marker(
+            [mid_lat + metric_lat_offset, mid_lon],
+            icon=folium.DivIcon(html=metric_html)
+        ).add_to(ghana_map)
 
-  # Formatted Text Report for Drivers
-  report_text = f"""==================================================
+    # Download Options for Map & Driver Report
+    st.markdown("### 📥 Export Route & Map Reports")
+    dl_col1, dl_col2 = st.columns(2)
+
+    map_html_data = ghana_map._repr_html_().encode("utf-8")
+    dl_col1.download_button(
+        label="Download Route Map (HTML)",
+        data=map_html_data,
+        file_name="ghana_route_map.html",
+        mime="text/html",
+        help="Download the interactive map file for management review and browser printing."
+    )
+
+    report_text = f"""==================================================
 GHANA SMART ROUTE & LOGISTICS - DRIVER MANIFEST
 ==================================================
+Winning Strategy: {st.session_state.best_strategy_name}
 Route Strategy: {st.session_state.corridor_choice}
 Total Distance: {st.session_state.total_distance:.1f} km
 Total Estimated Time: {st.session_state.total_time / 60:.1f} hours
@@ -407,21 +515,27 @@ Total Estimated Fuel Cost: GHS {st.session_state.total_distance * 2.1:.2f}
 SEGMENT DETAILS:
 --------------------------------------------------
 """
-  for leg in st.session_state.legs:
-    report_text += f"• Leg: {leg['Leg']}\n"
-    report_text += f"  - Distance: {leg['Distance (km)']} km\n"
-    report_text += f"  - Time: {leg['Time (hrs)']} hrs\n"
-    report_text += f"  - Fuel Cost: GHS {leg['Fuel Cost (GHS)']}\n"
-    report_text += f"  - Status: {leg['Status']}\n\n"
+    for leg in st.session_state.legs:
+        report_text += f"• Leg: {leg['Leg']}\n"
+        report_text += f"  - Distance: {leg['Distance (km)']} km\n"
+        report_text += f"  - Time: {leg['Time (hrs)']} hrs\n"
+        report_text += f"  - Fuel Cost: GHS {leg['Fuel Cost (GHS)']}\n"
+        report_text += f"  - Status: {leg['Status']}\n\n"
 
-  dl_col2.download_button(
-      label="Download Printable Report (TXT)",
-      data=report_text,
-      file_name="driver_route_report.txt",
-      mime="text/plain",
-      help="Download text summary for printing and driver briefing."
-  )
+    dl_col2.download_button(
+        label="Download Printable Report (TXT)",
+        data=report_text,
+        file_name="driver_route_report.txt",
+        mime="text/plain",
+        help="Download text summary for printing and driver briefing."
+    )
 
-  # Render Interactive Map in App
-  st.subheader("Interactive Multi-Stop Corridor Mapping")
-  st_folium(ghana_map, width=750, height=550)
+    st.subheader("Interactive Multi-Stop Corridor Mapping")
+    st_folium(ghana_map, width=750, height=550)
+
+
+st.sidebar.markdown("---")
+with st.sidebar.expander("ℹ️ System & Author Info"):
+    st.caption("**System:** JBG Logistics v1.0")
+    st.caption("**Engineer:** Daniel Borffo Mensah")
+    st.caption("**Tech Stack:** Python, Streamlit, Folium, Scikit-Learn")
