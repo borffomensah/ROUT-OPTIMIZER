@@ -536,6 +536,7 @@ SEGMENT DETAILS:
 
 st.sidebar.markdown("---")
 with st.sidebar.expander("ℹ️ System & Author Info"):
-    st.caption("**System:** JBG Logistics v1.0")
-    st.caption("**Engineer:** Daniel Borffo Mensah")
+    st.caption("**System:** JBG Logistics")
+    st.caption("**Engineer:** Daniel Borffo Mensah"
+"**Email:** "borffo.dev@gmail.com")
     st.caption("**Tech Stack:** Python, Streamlit, Folium, Scikit-Learn")
