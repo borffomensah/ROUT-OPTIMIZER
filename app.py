@@ -538,5 +538,5 @@ st.sidebar.markdown("---")
 with st.sidebar.expander("ℹ️ System & Author Info"):
     st.caption("**System:** JBG Logistics")
     st.caption("**Engineer:** Daniel Borffo Mensah"
-"**Email:** "borffo.dev@gmail.com")
+"**Email:** borffo.dev@gmail.com)
     st.caption("**Tech Stack:** Python, Streamlit, Folium, Scikit-Learn")
